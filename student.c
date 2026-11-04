@@ -55,21 +55,24 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
         double (*local)[3] = (double (*)[3])
             (private_forces + (size_t)thread * nbodies * 3);
 
-#pragma omp for schedule(dynamic)
+#pragma omp for schedule(guided, 64)
         for (unsigned i = 0; i < nbodies; ++i) {
             for (unsigned j = i + 1; j < nbodies; ++j) {
-                double rij[3], d2 = 0.0;
-                for (unsigned k = 0; k < 3; ++k) {
-                    rij[k] = pos[i][k] - pos[j][k];
-                    d2 += rij[k] * rij[k];
-                }
-                if (d2 <= cut2) {
-                    double d = sqrt(d2), d3 = d * d2;
-                    for (unsigned k = 0; k < 3; ++k) {
-                        double f = -rij[k] / d3;
-                        local[i][k] += f;
-                        local[j][k] -= f;
-                    }
+                double dx = pos[i][0] - pos[j][0];
+                double dy = pos[i][1] - pos[j][1];
+                double dz = pos[i][2] - pos[j][2];
+                double d2 = dx * dx + dy * dy + dz * dz;
+
+                if (d2 > 0.0 && d2 <= cut2) {
+                    double d = sqrt(d2);
+                    double factor = -1.0 / (d * d2);
+
+                    local[i][0] += dx * factor;
+                    local[i][1] += dy * factor;
+                    local[i][2] += dz * factor;
+                    local[j][0] -= dx * factor;
+                    local[j][1] -= dy * factor;
+                    local[j][2] -= dz * factor;
                     private_energy[thread] -= 1.0 / d;
                 }
             }
