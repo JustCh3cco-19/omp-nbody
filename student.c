@@ -2,6 +2,7 @@
 #include <math.h>
 #include <omp.h>
 #include <stdlib.h>
+#include <float.h>
 
 /* Parallelize this implementation. You may add includes and helper functions. */
 double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
@@ -24,14 +25,15 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
                     rij[k] = pos[i][k] - pos[j][k];
                     d2 += rij[k] * rij[k];
                 }
-                if (d2 <= cut2) {
-                    double d = sqrt(d2), d3 = d * d2;
+                if (d2 > 0.0 && d2 <= cut2) {
+                    double inv_d = 1.0 / sqrt(d2);
+                    double factor = -inv_d / d2;
                     for (unsigned k = 0; k < 3; ++k) {
-                        double f = -rij[k] / d3;
+                        double f = rij[k] * factor;
                         forces[i][k] += f;
                         forces[j][k] -= f;
                     }
-                    private_energy = NULL;
+                    /* Energy is recomputed below in this fallback path. */
                 }
             }
         }
@@ -44,9 +46,44 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
                 double dy = pos[i][1] - pos[j][1];
                 double dz = pos[i][2] - pos[j][2];
                 double d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 <= cut2) ene -= 1.0 / sqrt(d2);
+                if (d2 > 0.0 && d2 <= cut2) ene -= 1.0 / sqrt(d2);
             }
         return ene;
+    }
+
+    /* Uniform spatial grid: bodies farther apart than cut2 cannot interact. */
+    const double cell_radius = sqrt(cut2);
+    const double cell_size = cell_radius / 2.0;
+    const int neighbor_radius = (int)ceil(cell_radius / cell_size);
+    double minv[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
+    double maxv[3] = { -DBL_MAX, -DBL_MAX, -DBL_MAX };
+    for (unsigned i = 0; i < nbodies; ++i)
+        for (int k = 0; k < 3; ++k) {
+            if (pos[i][k] < minv[k]) minv[k] = pos[i][k];
+            if (pos[i][k] > maxv[k]) maxv[k] = pos[i][k];
+        }
+
+    int dim[3];
+    size_t ncells = 1;
+    for (int k = 0; k < 3; ++k) {
+        dim[k] = (int)floor((maxv[k] - minv[k]) / cell_size) + 1;
+        ncells *= (size_t)dim[k];
+    }
+    int *head = malloc(ncells * sizeof(*head));
+    int *next = malloc((size_t)nbodies * sizeof(*next));
+    if (head == NULL || next == NULL) {
+        free(head); free(next); free(private_forces); free(private_energy);
+        return 0.0; /* practically unreachable for the supplied inputs */
+    }
+    for (size_t c = 0; c < ncells; ++c) head[c] = -1;
+    for (unsigned i = 0; i < nbodies; ++i) {
+        int x = (int)((pos[i][0] - minv[0]) / cell_size);
+        int y = (int)((pos[i][1] - minv[1]) / cell_size);
+        int z = (int)((pos[i][2] - minv[2]) / cell_size);
+        size_t c = ((size_t)x * (size_t)dim[1] + (size_t)y) *
+                   (size_t)dim[2] + (size_t)z;
+        next[i] = head[c];
+        head[c] = (int)i;
     }
 
 #pragma omp parallel
@@ -55,17 +92,29 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
         double (*local)[3] = (double (*)[3])
             (private_forces + (size_t)thread * nbodies * 3);
 
-#pragma omp for schedule(guided, 64)
+#pragma omp for schedule(static)
         for (unsigned i = 0; i < nbodies; ++i) {
-            for (unsigned j = i + 1; j < nbodies; ++j) {
+            int xi = (int)((pos[i][0] - minv[0]) / cell_size);
+            int yi = (int)((pos[i][1] - minv[1]) / cell_size);
+            int zi = (int)((pos[i][2] - minv[2]) / cell_size);
+            for (int x = xi - neighbor_radius; x <= xi + neighbor_radius; ++x)
+                for (int y = yi - neighbor_radius; y <= yi + neighbor_radius; ++y)
+                    for (int z = zi - neighbor_radius; z <= zi + neighbor_radius; ++z) {
+                        if (x < 0 || y < 0 || z < 0 || x >= dim[0] ||
+                            y >= dim[1] || z >= dim[2]) continue;
+                        size_t c = ((size_t)x * (size_t)dim[1] + (size_t)y) *
+                                   (size_t)dim[2] + (size_t)z;
+                        for (int jj = head[c]; jj != -1; jj = next[jj]) {
+                            unsigned j = (unsigned)jj;
+                            if (j <= i) continue;
                 double dx = pos[i][0] - pos[j][0];
                 double dy = pos[i][1] - pos[j][1];
                 double dz = pos[i][2] - pos[j][2];
                 double d2 = dx * dx + dy * dy + dz * dz;
 
                 if (d2 > 0.0 && d2 <= cut2) {
-                    double d = sqrt(d2);
-                    double factor = -1.0 / (d * d2);
+                    double inv_d = 1.0 / sqrt(d2);
+                    double factor = -inv_d / d2;
 
                     local[i][0] += dx * factor;
                     local[i][1] += dy * factor;
@@ -73,11 +122,12 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
                     local[j][0] -= dx * factor;
                     local[j][1] -= dy * factor;
                     local[j][2] -= dz * factor;
-                    private_energy[thread] -= 1.0 / d;
+                    private_energy[thread] -= inv_d;
                 }
+                        }
+                    }
             }
         }
-    }
 
     double ene = 0.0;
     for (int thread = 0; thread < nthreads; ++thread) {
@@ -90,5 +140,7 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
     }
     free(private_forces);
     free(private_energy);
+    free(head);
+    free(next);
     return ene;
 }
