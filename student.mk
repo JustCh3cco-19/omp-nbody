@@ -1,7 +1,7 @@
 # Editable build settings. Uncomment or add assignments below.
 # Standard options: CC, CPPFLAGS, CFLAGS, LDFLAGS, LDLIBS.
 # Use += to extend defaults, or = to replace them.
-CFLAGS += -O3 -march=native
+CFLAGS += -O3 -march=native -ffast-math
 # CPPFLAGS += -DMY_OPTION=1
 # LDFLAGS += -L/path/to/libraries
 # LDLIBS += -lmy_library

@@ -53,7 +53,7 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
 
     /* Uniform spatial grid: bodies farther apart than cut2 cannot interact. */
     const double cell_radius = sqrt(cut2);
-    const double cell_size = cell_radius / 2.0;
+    const double cell_size = cell_radius / (nbodies >= 40000 ? 3.0 : 2.0);
     const int neighbor_radius = (int)ceil(cell_radius / cell_size);
     double minv[3] = { DBL_MAX, DBL_MAX, DBL_MAX };
     double maxv[3] = { -DBL_MAX, -DBL_MAX, -DBL_MAX };
@@ -92,8 +92,10 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
         double (*local)[3] = (double (*)[3])
             (private_forces + (size_t)thread * nbodies * 3);
 
-#pragma omp for schedule(static)
+#pragma omp for schedule(dynamic, 32)
         for (unsigned i = 0; i < nbodies; ++i) {
+            double fx = 0.0, fy = 0.0, fz = 0.0, energy = 0.0;
+            const double px = pos[i][0], py = pos[i][1], pz = pos[i][2];
             int xi = (int)((pos[i][0] - minv[0]) / cell_size);
             int yi = (int)((pos[i][1] - minv[1]) / cell_size);
             int zi = (int)((pos[i][2] - minv[2]) / cell_size);
@@ -102,31 +104,44 @@ double student_nbody(unsigned nbodies, double (*pos)[3], double cut2,
                     for (int z = zi - neighbor_radius; z <= zi + neighbor_radius; ++z) {
                         if (x < 0 || y < 0 || z < 0 || x >= dim[0] ||
                             y >= dim[1] || z >= dim[2]) continue;
+                        if (nbodies >= 40000) {
+                            double xlo = minv[0] + x * cell_size;
+                            double ylo = minv[1] + y * cell_size;
+                            double zlo = minv[2] + z * cell_size;
+                            double ax = fmax(fmax(xlo - px, px - (xlo + cell_size)), 0.0);
+                            double ay = fmax(fmax(ylo - py, py - (ylo + cell_size)), 0.0);
+                            double az = fmax(fmax(zlo - pz, pz - (zlo + cell_size)), 0.0);
+                            if (ax * ax + ay * ay + az * az > cut2) continue;
+                        }
                         size_t c = ((size_t)x * (size_t)dim[1] + (size_t)y) *
                                    (size_t)dim[2] + (size_t)z;
                         for (int jj = head[c]; jj != -1; jj = next[jj]) {
                             unsigned j = (unsigned)jj;
                             if (j <= i) continue;
-                double dx = pos[i][0] - pos[j][0];
-                double dy = pos[i][1] - pos[j][1];
-                double dz = pos[i][2] - pos[j][2];
-                double d2 = dx * dx + dy * dy + dz * dz;
+                            double dx = px - pos[j][0];
+                            double dy = py - pos[j][1];
+                            double dz = pz - pos[j][2];
+                            double d2 = dx * dx + dy * dy + dz * dz;
 
-                if (d2 > 0.0 && d2 <= cut2) {
-                    double inv_d = 1.0 / sqrt(d2);
-                    double factor = -inv_d / d2;
+                            if (d2 > 0.0 && d2 <= cut2) {
+                                double inv_d = 1.0 / sqrt(d2);
+                                double factor = -inv_d / d2;
 
-                    local[i][0] += dx * factor;
-                    local[i][1] += dy * factor;
-                    local[i][2] += dz * factor;
-                    local[j][0] -= dx * factor;
-                    local[j][1] -= dy * factor;
-                    local[j][2] -= dz * factor;
-                    private_energy[thread] -= inv_d;
-                }
+                                fx += dx * factor;
+                                fy += dy * factor;
+                                fz += dz * factor;
+                                local[j][0] -= dx * factor;
+                                local[j][1] -= dy * factor;
+                                local[j][2] -= dz * factor;
+                                energy -= inv_d;
+                            }
                         }
                     }
-            }
+            local[i][0] += fx;
+            local[i][1] += fy;
+            local[i][2] += fz;
+            private_energy[thread] += energy;
+        }
         }
 
     double ene = 0.0;
